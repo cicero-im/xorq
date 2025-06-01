@@ -1,3 +1,4 @@
+import operator
 from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Tuple
 
@@ -53,14 +54,6 @@ class Feature:
     def schema(self):
         """Get the schema from the offline expression."""
         return self.offline_expr.schema()
-
-    # def is_expired_expr(self, feature_timestamp_col, current_time: datetime = None):
-    #     """Return an expression that checks if a feature is expired based on its TTL."""
-    #     if self.ttl is None:
-    #         return xo.literal(False)
-    #     time_diff = xo.literal(current_time or datetime.now()) - feature_timestamp_col
-    #     ttl_lit = xo.literal(self.ttl.total_seconds()).cast("interval")
-    #     return time_diff > ttl_lit
 
     def clone(self, **kwargs):
         return type(self)(**self.__getstate__() | kwargs)
@@ -148,18 +141,13 @@ class FeatureRegistry:
     Registry of features
     """
 
-    feature_mapping: Mapping[str, Feature] = field(factory=dict)
-
-    @property
-    def features(self):
-        return tuple(self.feature_mapping.values())
+    features: Tuple[Feature] = field(
+        validator=deep_iterable(instance_of(Feature), instance_of(tuple))
+    )
 
     @property
     def entities(self):
         return tuple(set(feature.entity for feature in self.features))
-
-    def register_feature(self, feature: Feature):
-        self.feature_mapping[feature.name] = feature
 
     def get_entity_features(self, entity_name: str) -> List[Feature]:
         return [f for f in self.features if f.entity.name == entity_name]
@@ -173,15 +161,23 @@ class FeatureStore:
     """
 
     online_client: FlightClient = field(validator=instance_of(FlightClient))
-    registry: FeatureRegistry = field(
-        validator=instance_of(FeatureRegistry), factory=FeatureRegistry
-    )
     views: Mapping[str, FeatureView] = field(factory=dict)
 
+    @property
+    def registry(self):
+        return FeatureRegistry(
+            tuple(
+                set(
+                    sorted(
+                        (feature for view in self.views for feature in view.features),
+                        key=operator.attrgetter("name"),
+                    )
+                )
+            )
+        )
+
     def register_view(self, view: FeatureView):
-        # what if we clobber a view and but retain its features in the registry
-        for f in view.features:
-            self.registry.register_feature(f)
+        # how do we ensure we have no conflicting `Feature`s at registration
         self.views[view.name] = view
 
     def _build_online_expr(self, view_name: str):
