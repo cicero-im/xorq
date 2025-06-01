@@ -29,27 +29,34 @@ def _to_node(maybe_expr: Any) -> Node:
 class LineageNode:
     op: Node = field(validator=instance_of(Node))
     edge: Optional[str] = field(validator=optional(instance_of(str)), default=None)
-    # How do we validate that the children contains instances of self?
     children: Tuple["LineageNode", ...] = field(
         validator=instance_of(tuple), factory=tuple
     )
 
-
 @functools.singledispatch
 def _build(node: Node, target_field: Optional[str]) -> LineageNode:
     if isinstance(node, ScalarUDF):
-        children = tuple(
-            LineageNode(op=arg, edge="udf_input", children=())
-            for arg in node.args
-            if isinstance(arg, Node)
-        )
-        return LineageNode(op=node, edge="udf", children=children)
+        udf_children: List[LineageNode] = []
+        for arg in node.args:
+            if not isinstance(arg, Node):
+                continue
+
+            arg_subtree = _build(arg, target_field)
+            wrapper = LineageNode(
+                op=arg_subtree.op,
+                edge="udf_input",
+                children=arg_subtree.children,
+            )
+            udf_children.append(wrapper)
+
+        return LineageNode(op=node, edge="udf", children=tuple(udf_children))
 
     raw_children = get_children(node)
     children = tuple(
         _build(child, target_field) for child in raw_children if isinstance(child, Node)
     )
     return LineageNode(op=node, edge=None, children=children)
+
 
 
 @_build.register
@@ -171,3 +178,22 @@ def flatten_lineage(
             "steps": tuple(sorted(steps_set)),
         }
     return flat
+
+
+def print_lineage_ascii(
+    lineage_node: LineageNode,
+    indent: str = "",
+    is_last: bool = True,
+) -> None:
+    connector = "└─" if is_last else "├─"
+    print(f"{indent}{connector} {_label(lineage_node.op)}"
+          + (f" [{lineage_node.edge}]" if lineage_node.edge else ""))
+
+    if is_last:
+        new_indent = indent + "   "
+    else:
+        new_indent = indent + "│  "
+
+    for idx, child in enumerate(lineage_node.children):
+        child_is_last = (idx == len(lineage_node.children) - 1)
+        print_lineage_ascii(child, new_indent, child_is_last)
