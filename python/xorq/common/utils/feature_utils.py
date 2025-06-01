@@ -1,3 +1,4 @@
+import functools
 import operator
 from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Tuple
@@ -70,7 +71,6 @@ class FeatureView:
     """
 
     name: str = field(validator=instance_of(str))
-    entity: Entity = field(validator=instance_of(Entity))
     features: Tuple[Feature] = field(
         validator=deep_iterable(instance_of(Feature), instance_of(tuple))
     )
@@ -83,6 +83,15 @@ class FeatureView:
         self._enforce_ttl()
 
     @property
+    @functools.cache
+    def entity(self):
+        (entity, *rest) = set(feature.entity for feature in self.features)
+        if rest:
+            raise ValueError
+        return entity
+
+    @property
+    @functools.cache
     def timestamp_column(self):
         (timestamp_column, *rest) = set(
             feature.timestamp_column for feature in self.features
@@ -92,6 +101,7 @@ class FeatureView:
         return timestamp_column
 
     @property
+    @functools.cache
     def offline_expr(self):
         (expr, *others) = (feature.offline_expr for feature in self.features)
         for other in others:
@@ -103,6 +113,7 @@ class FeatureView:
         return self.offline_expr.schema()
 
     @property
+    @functools.cache
     def effective_ttl(self) -> Optional[timedelta]:
         """Get the minimum TTL among all features in the view."""
         ttls = [f.ttl for f in self.features if f.ttl is not None]
@@ -111,18 +122,21 @@ class FeatureView:
     def _validate_features(self):
         # we must have features
         assert self.features
+        # different features may not share a name
+        assert len(self.features) == set(feature.name for feature in self.features)
         # all features must have the same entity
-        invalid_features = tuple(
-            feature
-            for feature in self.features
-            if feature.entity.name != self.entity.name
+        self.entity
+        # all features must have the same timestamp_column
+        self.timestamp_column
+        # there must be no schema conflicts
+        (fields, *others) = map(set, (feature.schema for feature in self.features))
+        for other in others:
+            fields.union(other)
+        schema_overlap = fields.difference(
+            (self.entity.key_column, self.timestamp_column)
         )
-        if invalid_features:
-            raise ValueError(
-                f"Feature(s) {', '.join(feature.name for feature in invalid_features)} do not belong to {self.entity.name}"
-            )
-        # entities must not have schema conflicts
-        # fixme: enforce this
+        if schema_overlap:
+            raise ValueError
 
     def _enforce_ttl(self):
         if self.ttl is not None and any(
