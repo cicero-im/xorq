@@ -1,5 +1,9 @@
+from __future__ import annotations
+
+
 import functools
-from typing import Any, Dict, Optional, Set, Tuple
+from enum import Enum, auto
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from attrs import field, frozen
 from attrs.validators import instance_of, optional
@@ -9,6 +13,26 @@ import xorq.vendor.ibis.expr.operations as ops
 from xorq.common.utils.graph_utils import get_children
 from xorq.expr.udf import ScalarUDF
 from xorq.vendor.ibis.expr.operations.core import Node
+
+
+class EdgeKind(Enum):
+    PARENT = auto()
+    UDF = auto()
+    UDF_INPUT = auto()
+    RELATION = auto()
+    EXPR = auto()
+    METRIC = auto()
+    REMOTE_EXPR = auto()
+
+
+@frozen
+class Edge:
+    kind: EdgeKind = field(validator=instance_of(EdgeKind))
+    detail: Optional[str] = field(default=None, validator=optional(instance_of(str)))
+
+    def __str__(self) -> str:
+        suffix = f":{self.detail}" if self.detail is not None else ""
+        return f"{self.kind.name.lower()}{suffix}"
 
 
 def _label(node: Node) -> str:
@@ -28,10 +52,11 @@ def _to_node(maybe_expr: Any) -> Node:
 @frozen
 class LineageNode:
     op: Node = field(validator=instance_of(Node))
-    edge: Optional[str] = field(validator=optional(instance_of(str)), default=None)
+    edge: Optional[Edge] = field(validator=optional(instance_of(Edge)), default=None)
     children: Tuple["LineageNode", ...] = field(
         validator=instance_of(tuple), factory=tuple
     )
+
 
 @functools.singledispatch
 def _build(node: Node, target_field: Optional[str]) -> LineageNode:
@@ -40,16 +65,15 @@ def _build(node: Node, target_field: Optional[str]) -> LineageNode:
         for arg in node.args:
             if not isinstance(arg, Node):
                 continue
-
             arg_subtree = _build(arg, target_field)
-            wrapper = LineageNode(
-                op=arg_subtree.op,
-                edge="udf_input",
-                children=arg_subtree.children,
+            udf_children.append(
+                LineageNode(
+                    op=arg_subtree.op,
+                    edge=Edge(EdgeKind.UDF_INPUT),
+                    children=arg_subtree.children,
+                )
             )
-            udf_children.append(wrapper)
-
-        return LineageNode(op=node, edge="udf", children=tuple(udf_children))
+        return LineageNode(op=node, edge=Edge(EdgeKind.UDF), children=tuple(udf_children))
 
     raw_children = get_children(node)
     children = tuple(
@@ -57,37 +81,34 @@ def _build(node: Node, target_field: Optional[str]) -> LineageNode:
     )
     return LineageNode(op=node, edge=None, children=children)
 
-
-
 @_build.register
-def _(node: ops.Field, target_field: Optional[str]) -> LineageNode:
-    base_children = []
+def _(node: ops.Field, target_field: Optional[str]) -> LineageNode:  # noqa: D401
+    base_children: List[LineageNode] = []
     if node.rel is not None:
         rel_node = node.rel
-        child_relation = LineageNode(
-            op=rel_node,
-            edge="relation",
-            children=(_build(rel_node, target_field),),
-        )
-        base_children.append(child_relation)
 
-        other_cls = None
-        if isinstance(rel_node, (ops.Project,) + ((other_cls,) if other_cls else ())):
+        if isinstance(rel_node, (ops.Project,)) :
             _, mapping = rel_node.args
             raw_expr = mapping.get(node.name)
-            try:
-                expr_node = _to_node(raw_expr)
-            except TypeError:
-                return LineageNode(op=node, edge=None, children=tuple(base_children))
 
-            edge_label = "udf" if isinstance(expr_node, ScalarUDF) else "expr"
-            child_expr = LineageNode(
-                op=expr_node,
-                edge=edge_label,
-                children=(_build(expr_node, target_field),),
+            expr_node = _to_node(raw_expr)
+
+            edge_kind = EdgeKind.UDF if isinstance(expr_node, ScalarUDF) else EdgeKind.EXPR
+            base_children.append(
+                LineageNode(
+                    op=expr_node,
+                    edge=Edge(edge_kind),
+                    children=(_build(expr_node, target_field),),
+                )
             )
-            base_children.append(child_expr)
-
+        else:
+            base_children.append(
+            LineageNode(
+                op=rel_node,
+                edge=Edge(EdgeKind.RELATION),
+                children=(_build(rel_node, target_field),),
+            )
+        )
     return LineageNode(op=node, edge=None, children=tuple(base_children))
 
 
@@ -96,7 +117,7 @@ def _(node: ops.Aggregate, target_field: Optional[str]) -> LineageNode:
     metric_children = tuple(
         LineageNode(
             op=metric_expr,
-            edge=f"metric:{metric_name}",
+            edge=Edge(EdgeKind.METRIC, metric_name),
             children=(_build(metric_expr, target_field),),
         )
         for metric_name, metric_expr in node.metrics.items()
@@ -104,7 +125,7 @@ def _(node: ops.Aggregate, target_field: Optional[str]) -> LineageNode:
     )
     parent_child = LineageNode(
         op=node.parent,
-        edge="parent",
+        edge=Edge(EdgeKind.PARENT),
         children=(_build(node.parent, None),),
     )
     return LineageNode(op=node, edge=None, children=metric_children + (parent_child,))
@@ -115,7 +136,7 @@ def _(node: rel.RemoteTable, target_field: Optional[str]) -> LineageNode:
     remote_op = node.remote_expr.op()
     child_remote = LineageNode(
         op=remote_op,
-        edge="remote_expr",
+        edge=Edge(EdgeKind.REMOTE_EXPR),
         children=(_build(remote_op, target_field),),
     )
     return LineageNode(op=node, edge=None, children=(child_remote,))
@@ -124,12 +145,17 @@ def _(node: rel.RemoteTable, target_field: Optional[str]) -> LineageNode:
 @_build.register
 def _(node: ops.Project, target_field: Optional[str]) -> LineageNode:
     parent_op = node.parent
-    child_parent = LineageNode(
-        op=parent_op,
-        edge="parent",
-        children=(_build(parent_op, target_field),),
+    return LineageNode(
+        op=node,
+        edge=None,
+        children=(
+            LineageNode(
+                op=parent_op,
+                edge=Edge(EdgeKind.PARENT),
+                children=(_build(parent_op, target_field),),
+            ),
+        ),
     )
-    return LineageNode(op=node, edge=None, children=(child_parent,))
 
 
 def build_lineage_tree(node: Node, target_field: Optional[str] = None) -> LineageNode:
@@ -139,9 +165,7 @@ def build_lineage_tree(node: Node, target_field: Optional[str] = None) -> Lineag
 def build_column_lineage_dict(expr: Any) -> Dict[str, LineageNode]:
     op = expr.op()
     columns = getattr(op, "values", getattr(op, "fields", {}))
-    return {
-        name: build_lineage_tree(_to_node(col), name) for name, col in columns.items()
-    }
+    return {name: build_lineage_tree(_to_node(col), name) for name, col in columns.items()}
 
 
 def flatten_lineage(
@@ -149,7 +173,12 @@ def flatten_lineage(
     blacklist: Optional[Tuple[str, ...]] = None,
 ) -> Dict[str, Any]:
     if blacklist is None:
-        blacklist = ("RemoteTable", "DatabaseTable", "Cast(", "Project")
+        blacklist = (
+            "RemoteTable",
+            "DatabaseTable",
+            "Cast(",
+            "Project",
+        )
 
     def walk(node: LineageNode, steps: Set[str], inputs: Set[str]) -> None:
         label = _label(node.op)
@@ -163,8 +192,15 @@ def flatten_lineage(
             edge = child.edge
             if (
                 edge is None
-                or edge in {"udf", "udf_input", "relation", "expr", "metric", "parent"}
-                or (edge and edge.startswith("metric:"))
+                or edge.kind
+                in {
+                    EdgeKind.UDF,
+                    EdgeKind.UDF_INPUT,
+                    EdgeKind.RELATION,
+                    EdgeKind.EXPR,
+                    EdgeKind.METRIC,
+                    EdgeKind.PARENT,
+                }
             ):
                 walk(child, steps, inputs)
 
@@ -186,14 +222,9 @@ def print_lineage_ascii(
     is_last: bool = True,
 ) -> None:
     connector = "└─" if is_last else "├─"
-    print(f"{indent}{connector} {_label(lineage_node.op)}"
-          + (f" [{lineage_node.edge}]" if lineage_node.edge else ""))
+    edge_str = f" [{lineage_node.edge}]" if lineage_node.edge else ""
+    print(f"{indent}{connector} {_label(lineage_node.op)}{edge_str}")
 
-    if is_last:
-        new_indent = indent + "   "
-    else:
-        new_indent = indent + "│  "
-
+    new_indent = indent + ("   " if is_last else "│  ")
     for idx, child in enumerate(lineage_node.children):
-        child_is_last = (idx == len(lineage_node.children) - 1)
-        print_lineage_ascii(child, new_indent, child_is_last)
+        print_lineage_ascii(child, new_indent, idx == len(lineage_node.children) - 1)
