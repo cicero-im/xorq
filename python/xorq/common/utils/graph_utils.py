@@ -1,5 +1,53 @@
+from typing import List
+
 import xorq.expr.relations as rel
 import xorq.expr.udf as udf
+from xorq.vendor.ibis.expr.operations.core import Node
+
+
+def get_children(node: Node) -> List[Node]:
+    children = []
+
+    if isinstance(node, rel.RemoteTable):
+        remote_expr = node.remote_expr
+        try:
+            children.append(remote_expr.op())
+        except AttributeError:
+            children.append(remote_expr)
+
+        return children
+
+    if isinstance(node, rel.CachedNode):
+        children.append(node.parent)
+        return children
+
+    if isinstance(node, rel.FlightExpr):
+        children.append(node.input_expr)
+        return children
+
+    if isinstance(node, rel.FlightUDXF):
+        children.append(node.input_expr)
+        return children
+
+    if isinstance(node, udf.ExprScalarUDF):
+        exprs = node.computed_kwargs_expr
+        if isinstance(exprs, Node):
+            children.append(exprs)
+        else:
+            for item in exprs:
+                if isinstance(item, Node):
+                    children.append(item)
+        return children
+
+    if isinstance(node, rel.Read):
+        return []
+
+    raw_children = getattr(node, "__children__", ())
+    for child in raw_children:
+        if isinstance(child, Node):
+            children.append(child)
+
+    return children
 
 
 opaque_ops = (
