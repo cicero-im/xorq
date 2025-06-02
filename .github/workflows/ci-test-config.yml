@@ -48,7 +48,7 @@ jobs:
         working-directory: ${{ github.workspace }}
 
       - name: pytest
-        run: uv run --no-sync pytest --import-mode=importlib python/xorq/common/utils/tests/test_caching_utils.py -v --cov --cov-report=xml
+        run: uv run --no-sync pytest --import-mode=importlib python/xorq/common/utils/tests/test_caching_utils.py -v -s --cov --cov-report=xml
         working-directory: ${{ github.workspace }}
 
       - name: Upload coverage reports to Codecov
