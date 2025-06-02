@@ -24,6 +24,9 @@ class EdgeKind(Enum):
     METRIC = auto()
     REMOTE_EXPR = auto()
 
+    GROUP_BY = auto()
+    ORDER_BY = auto()
+
 
 @frozen
 class Edge:
@@ -214,6 +217,59 @@ def flatten_lineage(
             "steps": tuple(sorted(steps_set)),
         }
     return flat
+
+
+@_build.register
+def _(node: ops.WindowFunction, target_field: Optional[str]) -> LineageNode:
+    children: list[LineageNode] = []
+
+    expr_node = _to_node(node.func)
+    children.append(
+        LineageNode(
+            op=expr_node,
+            edge=Edge(EdgeKind.EXPR),
+            children=(_build(expr_node, None),),
+        )
+    )
+
+    group_keys = (
+        getattr(node, "group_by", None)
+        or ()
+    )
+    for g in group_keys:
+        g_node = _to_node(g)
+        children.append(
+            LineageNode(
+                op=g_node,
+                edge=Edge(EdgeKind.GROUP_BY),
+                children=(_build(g_node, None),),
+            )
+        )
+
+    order_keys = getattr(node, "order_by", ()) or ()
+    for o in order_keys:
+        o_node = _to_node(o)
+        children.append(
+            LineageNode(
+                op=o_node,
+                edge=Edge(EdgeKind.ORDER_BY),
+                children=(_build(o_node, None),),
+            )
+        )
+
+    for boundary_attr, ek in (("start", EdgeKind.EXPR), ("end", EdgeKind.EXPR)):
+        b = getattr(node, boundary_attr, None)
+        if b is not None:
+            b_node = _to_node(b)
+            children.append(
+                LineageNode(
+                    op=b_node,
+                    edge=Edge(ek),
+                    children=(_build(b_node, None),),
+                )
+            )
+
+    return LineageNode(op=node, edge=None, children=tuple(children))
 
 
 def print_lineage_ascii(
