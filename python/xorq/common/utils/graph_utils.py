@@ -1,54 +1,66 @@
-from typing import List
+from typing import List, Iterable, Optional, Tuple, Any
 
 import xorq.expr.relations as rel
 import xorq.expr.udf as udf
+import xorq.vendor.ibis.expr.operations as ops
 from xorq.vendor.ibis.expr.operations.core import Node
 
+def _filter_none(values: Iterable[Optional[Node]]) -> Tuple[Node, ...]:
+    return tuple(v for v in values if v is not None)
 
-def get_children(node: Node) -> List[Node]:
-    children = []
 
-    if isinstance(node, rel.RemoteTable):
-        remote_expr = node.remote_expr
+def to_node(maybe_expr: Any) -> Node:
+    while not isinstance(maybe_expr, Node):
+        op_fn = getattr(maybe_expr, "op", None)
+        if op_fn is None:
+            raise TypeError(f"Cannot convert {type(maybe_expr).__name__} into an Ibis Node")
+        maybe_expr = op_fn()
+    return maybe_expr
+
+
+def children_of(node: Node) -> Tuple[Node, ...]:
+    def _as_node(value: Any) -> Optional[Node]:
         try:
-            children.append(remote_expr.op())
-        except AttributeError:
-            children.append(remote_expr)
+            return to_node(value)
+        except (TypeError, AttributeError):
+            return None
 
-        return children
+    match node:
+        case ops.Field():
+            rel_node = node.rel
+            if rel_node is None:
+                return tuple()
+            # If the relation is a Project, follow the *specific* expression that
+            # produced this field instead of the whole Project.
+            if isinstance(rel_node, ops.Project):
+                _, mapping = rel_node.args
+                expr = mapping.get(node.name)
+                return _filter_none((_as_node(expr),))
+            return _filter_none((_as_node(rel_node),))
 
-    if isinstance(node, rel.CachedNode):
-        children.append(node.parent)
-        return children
+        case rel.RemoteTable():
+            return _filter_none((_as_node(node.remote_expr),))
+        case rel.CachedNode():
+            return (to_node(node.parent),)
+        case rel.FlightExpr():
+            return (to_node(node.input_expr),)
+        case rel.FlightUDXF():
+            return (to_node(node.input_expr),)
 
-    if isinstance(node, rel.FlightExpr):
-        children.append(node.input_expr)
-        return children
+        case udf.ExprScalarUDF():
+            exprs = node.computed_kwargs_expr
+            if isinstance(exprs, Node):
+                return (exprs,)
+            if exprs is not None:
+                return _filter_none(map(_as_node, exprs))
+            return tuple()
 
-    if isinstance(node, rel.FlightUDXF):
-        children.append(node.input_expr)
-        return children
+        case rel.Read():
+            return tuple()  # leaf
 
-    if isinstance(node, udf.ExprScalarUDF):
-        exprs = node.computed_kwargs_expr
-        if isinstance(exprs, Node):
-            children.append(exprs)
-        else:
-            for item in exprs:
-                if isinstance(item, Node):
-                    children.append(item)
-        return children
-
-    if isinstance(node, rel.Read):
-        return []
-
-    raw_children = getattr(node, "__children__", ())
-    for child in raw_children:
-        if isinstance(child, Node):
-            children.append(child)
-
-    return children
-
+        case _:
+            raw_children = getattr(node, "__children__", ())
+            return _filter_none(map(_as_node, raw_children))
 
 opaque_ops = (
     rel.Read,
