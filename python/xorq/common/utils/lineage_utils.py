@@ -1,51 +1,17 @@
 from __future__ import annotations
 
-import functools
-from enum import Enum, auto
-from typing import Any, Callable, Dict, Optional, Set, Tuple
-
+from typing import Any, Callable, Dict, List, Tuple
 from attrs import evolve, field, frozen
-from attrs.validators import instance_of, optional
+from attrs.validators import instance_of
 
 import xorq.expr.relations as rel
+import xorq.expr.udf as udf
 import xorq.vendor.ibis.expr.operations as ops
-from xorq.common.utils.graph_utils import get_children
-from xorq.expr.udf import ScalarUDF
 from xorq.vendor.ibis.expr.operations.core import Node
-
-
-class EdgeKind(Enum):
-    PARENT = auto()
-    UDF = auto()
-    UDF_INPUT = auto()
-    RELATION = auto()
-    EXPR = auto()
-    METRIC = auto()
-    REMOTE_EXPR = auto()
-
-    GROUP_BY = auto()
-    ORDER_BY = auto()
-
-
-@frozen
-class Edge:
-    """Relationship between this node and its parent."""
-
-    kind: EdgeKind = field(validator=instance_of(EdgeKind))
-    detail: Optional[str] = field(default=None, validator=optional(instance_of(str)))
-
-    def __str__(self) -> str:
-        return f"{self.kind.name.lower()}{f':{self.detail}' if self.detail else ''}"
-
-
-def _label(node: Node) -> str:
-    name = getattr(node, "name", None)
-    return f"{name} ({type(node).__name__})" if name else type(node).__name__
 
 
 def _to_node(maybe_expr: Any) -> Node:
     """Normalize *anything* that quacks like an Ibis Expr into a Node."""
-
     while not isinstance(maybe_expr, Node):
         if hasattr(maybe_expr, "op"):
             maybe_expr = maybe_expr.op()
@@ -54,188 +20,177 @@ def _to_node(maybe_expr: Any) -> Node:
     return maybe_expr
 
 
+def get_children(node: Node) -> List[Node]:
+    """Get children with special handling for RemoteTable, FlightUDXF, etc."""
+    children = []
+
+    # Special handling for Field nodes to avoid including entire Project
+    if isinstance(node, ops.Field):
+        if (rel_node := node.rel) is not None:
+            if isinstance(rel_node, ops.Project):
+                # For Project, follow the specific expression for this field
+                _, mapping = rel_node.args
+                if node.name in mapping:
+                    raw_expr = mapping[node.name]
+                    children.append(_to_node(raw_expr))
+                    return children
+            # For non-Project relations, follow the relation
+            children.append(_to_node(rel_node))
+        return children
+
+    if isinstance(node, rel.RemoteTable):
+        remote_expr = node.remote_expr
+        try:
+            children.append(_to_node(remote_expr))
+        except (AttributeError, TypeError):
+            pass  # Skip if we can't convert to node
+        return children
+
+    if isinstance(node, rel.CachedNode):
+        children.append(_to_node(node.parent))
+        return children
+
+    if isinstance(node, rel.FlightExpr):
+        children.append(_to_node(node.input_expr))
+        return children
+
+    if isinstance(node, rel.FlightUDXF):
+        children.append(_to_node(node.input_expr))
+        return children
+
+    if isinstance(node, udf.ExprScalarUDF):
+        exprs = node.computed_kwargs_expr
+        if isinstance(exprs, Node):
+            children.append(exprs)
+        elif exprs is not None:
+            for item in exprs:
+                try:
+                    children.append(_to_node(item))
+                except (TypeError, AttributeError):
+                    pass  # Skip items that can't be converted to nodes
+        return children
+
+    if isinstance(node, rel.Read):
+        return []
+
+    # Default case: use __children__
+    raw_children = getattr(node, "__children__", ())
+    for child in raw_children:
+        try:
+            children.append(_to_node(child))
+        except (TypeError, AttributeError):
+            pass  # Skip items that can't be converted to nodes
+
+    return children
+
+
 @frozen
-class LineageNode:
+class GenericNode:
+    """A simple node in a tree with no edge semantics."""
     op: Node = field(validator=instance_of(Node))
-    edge: Optional[Edge] = field(default=None, validator=optional(instance_of(Edge)))
-    children: Tuple["LineageNode", ...] = field(
+    children: Tuple["GenericNode", ...] = field(
         factory=tuple, validator=instance_of(tuple)
     )
 
-    def map_children(self, fn: "_ChildMapper") -> "LineageNode":
+    def map_children(self, fn: Callable[["GenericNode"], "GenericNode"]) -> "GenericNode":
         return evolve(self, children=tuple(fn(c) for c in self.children))
 
-    def clone(self, **changes: Any) -> "LineageNode":
+    def clone(self, **changes: Any) -> "GenericNode":
         return evolve(self, **changes)
 
-    def __attrs_post_init__(self):
-        for c in self.children:
-            if not isinstance(c, LineageNode):
-                raise TypeError("children must be LineageNode instances, got " f"{type(c).__name__}")
 
-
-_ChildMapper = Callable[[LineageNode], LineageNode]
-
-
-@functools.singledispatch
-def _build(node: Node, target_field: Optional[str]) -> LineageNode:  # noqa: D401
-    """Default builder – recurses into children via graph_utils.get_children."""
-
-    # Special‑case ScalarUDF so args are tagged with UDF_INPUT.
-    if isinstance(node, ScalarUDF):
-        udf_kids: Tuple[LineageNode, ...] = tuple(
-            LineageNode(op=sub.op, edge=Edge(EdgeKind.UDF_INPUT), children=sub.children)
-            for arg in node.args
-            if isinstance(arg, Node) and (sub := _build(arg, target_field))
-        )
-        return LineageNode(op=node, edge=Edge(EdgeKind.UDF), children=udf_kids)
-
+def build_tree(node: Node) -> GenericNode:
+    """Build a generic tree from any node by recursively traversing children."""
     raw_children = get_children(node)
-    kids = tuple(_build(c, target_field) for c in raw_children if isinstance(c, Node))
-    return LineageNode(op=node, edge=None, children=kids)
+    children = tuple(build_tree(child) for child in raw_children)
+    return GenericNode(op=node, children=children)
 
 
-@_build.register
-def _field(node: ops.Field, target_field: Optional[str]) -> LineageNode:  # noqa: D401
-    children: Tuple[LineageNode, ...] = ()
-    if (rel_node := node.rel) is not None:
-        if isinstance(rel_node, ops.Project):
-            _, mapping = rel_node.args
-            raw_expr = mapping.get(node.name)
-            expr_node = _to_node(raw_expr)
-            edge_kind = EdgeKind.UDF if isinstance(expr_node, ScalarUDF) else EdgeKind.EXPR
-            children = (
-                LineageNode(op=expr_node, edge=Edge(edge_kind), children=(
-                    _build(expr_node, target_field),
-                )),
-            )
-        else:
-            children = (
-                LineageNode(op=rel_node, edge=Edge(EdgeKind.RELATION), children=(
-                    _build(rel_node, target_field),
-                )),
-            )
-    return LineageNode(op=node, edge=None, children=children)
-
-
-@_build.register
-def _aggregate(node: ops.Aggregate, target_field: Optional[str]) -> LineageNode:  # noqa: D401
-    metric_kids = tuple(
-        LineageNode(
-            op=expr,
-            edge=Edge(EdgeKind.METRIC, name),
-            children=(_build(expr, target_field),),
-        )
-        for name, expr in node.metrics.items()
-        if target_field is None or name == target_field
-    )
-    parent_child = LineageNode(op=node.parent, edge=Edge(EdgeKind.PARENT), children=(
-        _build(node.parent, None),
-    ))
-    return LineageNode(op=node, edge=None, children=metric_kids + (parent_child,))
-
-
-@_build.register
-def _remote_table(node: rel.RemoteTable, target_field: Optional[str]) -> LineageNode:  # noqa: D401
-    remote_op = node.remote_expr.op()
-    child_remote = LineageNode(op=remote_op, edge=Edge(EdgeKind.REMOTE_EXPR), children=(
-        _build(remote_op, target_field),
-    ))
-    return LineageNode(op=node, edge=None, children=(child_remote,))
-
-
-@_build.register
-def _project(node: ops.Project, target_field: Optional[str]) -> LineageNode:  # noqa: D401
-    parent_op = node.parent
-    return LineageNode(op=node, edge=None, children=(
-        LineageNode(op=parent_op, edge=Edge(EdgeKind.PARENT), children=(
-            _build(parent_op, target_field),
-        )),
-    ))
-
-
-@_build.register
-def _window(node: ops.WindowFunction, target_field: Optional[str]):  # noqa: D401
-    kids: Tuple[LineageNode, ...] = ()
-
-    def _add(kind: EdgeKind, obj: Any):
-        nonlocal kids
-        n = _to_node(obj)
-        kids += (LineageNode(op=n, edge=Edge(kind), children=(
-            _build(n, None),
-        )),)
-
-    _add(EdgeKind.EXPR, node.func)
-    for g in getattr(node, "group_by", ()) or ():
-        _add(EdgeKind.GROUP_BY, g)
-    for o in getattr(node, "order_by", ()) or ():
-        _add(EdgeKind.ORDER_BY, o)
-    for attr in ("start", "end"):
-        if (b := getattr(node, attr, None)) is not None:
-            _add(EdgeKind.EXPR, b)
-
-    return LineageNode(op=node, edge=None, children=kids)
-
-
-def build_lineage_tree(node: Node, *, target_field: Optional[str] = None) -> LineageNode:
-    """Build lineage tree for a *single* expression/field."""
-    return _build(node, target_field)
-
-
-def build_column_lineage(expr: Any) -> Dict[str, LineageNode]:
-    """Return mapping column‑name → lineage tree."""
+def build_column_trees(expr: Any) -> Dict[str, GenericNode]:
+    """Return mapping column-name → tree for all columns in the expression."""
     op = expr.op()
+
+    # First try the standard way (works for Project, etc.)
     cols: Dict[str, Any] = getattr(op, "values", getattr(op, "fields", {}))
-    return {
-        name: build_lineage_tree(_to_node(col), target_field=name)
-        for name, col in cols.items()
-    }
+
+    if cols:
+        return {
+            name: build_tree(_to_node(col))
+            for name, col in cols.items()
+        }
+
+    # For table expressions without values/fields (like RemoteTable),
+    # create Field nodes for each column in the schema
+    try:
+        schema = expr.schema()
+        return {
+            name: build_tree(ops.Field(rel=op, name=name))
+            for name in schema.names
+        }
+    except (AttributeError, TypeError):
+        # Fallback: return empty dict if we can't determine columns
+        return {}
 
 
-_DefaultBlacklist: Tuple[str, ...] = (
-    "RemoteTable",
-    "DatabaseTable",
-    "Cast(",
-    "Project",
-)
+def walk_tree(node: GenericNode, visitor: Callable[[Node], None]) -> None:
+    """Visit every node in the tree with the given visitor function."""
+    visitor(node.op)
+    for child in node.children:
+        walk_tree(child, visitor)
 
 
-def flatten_lineage(
-    lineage: Dict[str, LineageNode],
+def collect_nodes(node: GenericNode, predicate: Callable[[Node], bool] = None) -> Tuple[Node, ...]:
+    """Collect all nodes that match the predicate (or all nodes if no predicate)."""
+    nodes = []
+
+    def collector(op: Node) -> None:
+        if predicate is None or predicate(op):
+            nodes.append(op)
+
+    walk_tree(node, collector)
+    return tuple(nodes)
+
+
+def _label(node: Node) -> str:
+    """Get a human-readable label for a node."""
+    name = getattr(node, "name", None)
+    return f"{name} ({type(node).__name__})" if name else type(node).__name__
+
+
+def get_node_names(node: GenericNode) -> Tuple[str, ...]:
+    """Get names of all nodes in the tree."""
+    return tuple(_label(op) for op in collect_nodes(node))
+
+
+def flatten_tree(
+    trees: Dict[str, GenericNode],
     *,
-    blacklist: Tuple[str, ...] = _DefaultBlacklist,
+    blacklist: Tuple[str, ...] = ("RemoteTable", "DatabaseTable", "Cast(", "Project"),
 ) -> Dict[str, Dict[str, Tuple[str, ...]]]:
     """Collapse deep trees into `{col: {inputs, steps}}` for fast assertions."""
 
-    def _walk(node: LineageNode, steps: Set[str], inputs: Set[str]):
+    def _walk(node: GenericNode, steps: set, inputs: set):
         label = _label(node.op)
         if label.endswith("(Field)"):
             inputs.add(label.split()[0])
         elif not any(b in label for b in blacklist):
             steps.add(label)
-        if node.edge is None or node.edge.kind in {
-            EdgeKind.UDF,
-            EdgeKind.UDF_INPUT,
-            EdgeKind.RELATION,
-            EdgeKind.EXPR,
-            EdgeKind.METRIC,
-            EdgeKind.PARENT,
-        }:
-            for child in node.children:
-                _walk(child, steps, inputs)
+
+        for child in node.children:
+            _walk(child, steps, inputs)
 
     out: Dict[str, Dict[str, Tuple[str, ...]]] = {}
-    for col, tree in lineage.items():
+    for col, tree in trees.items():
         s, i = set(), set()
         _walk(tree, s, i)
         out[col] = {"inputs": tuple(sorted(i)), "steps": tuple(sorted(s))}
     return out
 
 
-def print_lineage_ascii(node: LineageNode, *, indent: str = "", is_last: bool = True) -> None:  # noqa: D401
+def print_tree(node: GenericNode, *, indent: str = "", is_last: bool = True) -> None:
     connector = "└─" if is_last else "├─"
-    edge_str = f" [{node.edge}]" if node.edge else ""
-    print(f"{indent}{connector} {_label(node.op)}{edge_str}")
+    print(f"{indent}{connector} {_label(node.op)}")
+
     new_indent = indent + ("   " if is_last else "│  ")
     for idx, child in enumerate(node.children):
-        print_lineage_ascii(child, indent=new_indent, is_last=idx == len(node.children) - 1)
+        print_ascii_tree(child, indent=new_indent, is_last=idx == len(node.children) - 1)
