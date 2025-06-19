@@ -8,6 +8,7 @@ import toolz
 
 import xorq as xo
 from xorq.common.utils.toolz_utils import curry
+from security import safe_requests
 
 
 base_api_url = "https://hacker-news.firebaseio.com/v0"
@@ -32,7 +33,7 @@ def simple_disk_cache(f, cache_dir, serde):
 
 
 def get_json(url):
-    resp = requests.get(url)
+    resp = safe_requests.get(url)
     resp.raise_for_status()
     return resp.json()
 
