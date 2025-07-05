@@ -1,5 +1,4 @@
 import argparse
-import random
 import time
 import traceback
 from datetime import datetime
@@ -16,6 +15,7 @@ from xorq.flight import (
 from xorq.flight.client import (
     FlightClient,
 )
+import secrets
 
 
 db_path = "multi_duck.db"
@@ -38,7 +38,7 @@ def write_data(table_name, client):
         (
             {
                 "id": int(time.time()),
-                "value": f"val-{random.randint(100, 999)}",
+                "value": f"val-{secrets.SystemRandom().randint(100, 999)}",
             },
         )
     )

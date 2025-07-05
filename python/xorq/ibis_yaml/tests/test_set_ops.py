@@ -1,15 +1,15 @@
-import random
 
 import pytest
 from pytest import param
 
 import xorq as xo
 from xorq import _
+import secrets
 
 
 @pytest.fixture
 def union_subsets(alltypes):
-    randomizer = random.Random(42)
+    randomizer = secrets.SystemRandom().Random(42)
     cols_a, cols_b, cols_c = (
         randomizer.sample(alltypes.columns, k=len(alltypes.columns)) for _ in range(3)
     )

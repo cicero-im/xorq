@@ -1,5 +1,4 @@
 import functools
-import random
 import socket
 from typing import Optional
 from urllib.parse import urlunparse
@@ -22,6 +21,7 @@ from xorq.flight.server import (
     FlightServerDelegate,
     NoOpAuthHandler,
 )
+import secrets
 
 
 DEFAULT_AUTH_MIDDLEWARE = {
@@ -68,7 +68,7 @@ class FlightUrl:
 
     def find_and_bind_socket(self):
         while True:
-            port = random.randint(5000, 8000)
+            port = secrets.SystemRandom().randint(5000, 8000)
             try:
                 self._socket = self._bind_socket(self.host, port)
                 self.port = port

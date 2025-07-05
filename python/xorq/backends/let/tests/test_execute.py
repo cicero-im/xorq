@@ -1,5 +1,4 @@
 import itertools
-import random
 from operator import methodcaller
 from pathlib import PosixPath
 
@@ -14,6 +13,7 @@ from xorq.tests.util import (
     assert_frame_equal,
 )
 from xorq.vendor import ibis
+import secrets
 
 
 KEY_PREFIX = xo.config.options.cache.key_prefix
@@ -46,10 +46,10 @@ def check_eq(left, right, how, **kwargs):
 def union_subsets(alltypes, alltypes_df):
     cols_a, cols_b, cols_c = (alltypes.columns.copy() for _ in range(3))
 
-    random.seed(89)
-    random.shuffle(cols_a)
-    random.shuffle(cols_b)
-    random.shuffle(cols_c)
+    secrets.SystemRandom().seed(89)
+    secrets.SystemRandom().shuffle(cols_a)
+    secrets.SystemRandom().shuffle(cols_b)
+    secrets.SystemRandom().shuffle(cols_c)
     assert cols_a != cols_b != cols_c
 
     cols_a = [ca for ca in cols_a if ca != "timestamp_col"]

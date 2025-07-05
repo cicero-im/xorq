@@ -6,7 +6,6 @@ import pickle
 import types
 import warnings
 from pathlib import Path
-from random import Random
 from typing import TYPE_CHECKING, Callable, Iterable, Iterator, List, Tuple, Union
 
 import dask
@@ -27,6 +26,7 @@ from xorq.vendor.ibis.common.patterns import pattern, replace
 from xorq.vendor.ibis.expr.operations.udf import InputType, ScalarUDF
 from xorq.vendor.ibis.expr.rules import ValueOf
 from xorq.vendor.ibis.util import Namespace
+import secrets
 
 
 if TYPE_CHECKING:
@@ -149,7 +149,7 @@ def calc_split_conditions(
     bounds = _calculate_bounds(test_sizes=test_sizes)
 
     # Set the random seed if set, & Generate a random 256-bit key
-    random_str = str(Random(random_seed).getrandbits(256))
+    random_str = str(secrets.SystemRandom().Random(random_seed).getrandbits(256))
 
     comb_key = literal(",").join(table[col].cast("str") for col in unique_key)
     split_bucket = comb_key.concat(random_str).hash().abs().mod(num_buckets)

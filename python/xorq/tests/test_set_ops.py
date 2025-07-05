@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import random
-
 import pandas as pd
 import pytest
 from pytest import param
@@ -10,16 +8,17 @@ import xorq as xo
 import xorq.vendor.ibis.expr.types as ir
 from xorq.tests.util import assert_frame_equal
 from xorq.vendor.ibis import _
+import secrets
 
 
 @pytest.fixture
 def union_subsets(alltypes, df):
     cols_a, cols_b, cols_c = (alltypes.columns.copy() for _ in range(3))
 
-    random.seed(89)
-    random.shuffle(cols_a)
-    random.shuffle(cols_b)
-    random.shuffle(cols_c)
+    secrets.SystemRandom().seed(89)
+    secrets.SystemRandom().shuffle(cols_a)
+    secrets.SystemRandom().shuffle(cols_b)
+    secrets.SystemRandom().shuffle(cols_c)
     assert cols_a != cols_b != cols_c
 
     a = alltypes.filter((_.id >= 5200) & (_.id <= 5210))[cols_a]
