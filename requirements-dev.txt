@@ -59,7 +59,7 @@ beautifulsoup4==4.13.4
     # via nbconvert
 beniget==0.4.2.post1 ; sys_platform == 'darwin'
     # via pythran
-black==25.1.0
+black==26.3.1
     # via
     #   blackdoc
     #   quartodoc
