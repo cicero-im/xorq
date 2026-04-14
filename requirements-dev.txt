@@ -547,7 +547,7 @@ pyopenssl==25.1.0
     # via snowflake-connector-python
 pyparsing==3.2.3
     # via pyiceberg
-pytest==8.3.5
+pytest==9.0.3
     # via
     #   pytest-codspeed
     #   pytest-cov
