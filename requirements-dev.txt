@@ -571,7 +571,7 @@ python-dotenv==1.1.0
     # via pydantic-settings
 python-json-logger==3.3.0
     # via jupyter-events
-python-multipart==0.0.20
+python-multipart==0.0.26
     # via mcp
 pythran==0.18.0 ; sys_platform == 'darwin'
     # via xorq
