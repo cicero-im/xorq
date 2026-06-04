@@ -689,7 +689,7 @@ sse-starlette==2.3.6
     # via mcp
 stack-data==0.6.3
     # via ipython
-starlette==0.47.0
+starlette==1.0.1
     # via mcp
 strictyaml==1.7.3
     # via pyiceberg
