@@ -724,7 +724,7 @@ toolz==1.0.0
     #   dask
     #   partd
     #   xorq
-tornado==6.5.1
+tornado==6.5.7
     # via
     #   ipykernel
     #   jupyter-client
