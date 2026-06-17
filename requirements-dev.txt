@@ -242,7 +242,7 @@ humanize==4.12.3 ; python_full_version < '4.0'
     # via pins
 identify==2.6.12
     # via pre-commit
-idna==3.10
+idna==3.15
     # via
     #   anyio
     #   httpx
